@@ -1,67 +1,59 @@
 import Foundation
-import SwiftUI
-import Combine
 
-struct Note: Identifiable, Codable {
+struct Note: Identifiable, Codable, Equatable {
     let id: UUID
     var content: String
     var createdAt: Date
-    var isFromiPhone: Bool
+    var source: String
 
-    init(id: UUID = UUID(), content: String, createdAt: Date = Date(), isFromiPhone: Bool = false) {
-        self.id           = id
-        self.content      = content
-        self.createdAt    = createdAt
-        self.isFromiPhone = isFromiPhone
+    init(id: UUID = UUID(), content: String, createdAt: Date = .now, source: String = "Mac") {
+        self.id = id
+        self.content = content
+        self.createdAt = createdAt
+        self.source = source
     }
 }
 
-class NoteService: ObservableObject {
-    @Published var notes: [Note] = []
+@MainActor
+final class NoteService: ObservableObject {
+    @Published private(set) var notes: [Note] = []
 
-    private let storageKey = "islandmac.notes"
+    private let storageURL: URL
+    private let decoder = JSONDecoder()
+    private let encoder = JSONEncoder()
 
     init() {
-        loadNotes()
-        // Hiç not yoksa örnek birini ekle
-        if notes.isEmpty {
-            notes = [
-                Note(content: "Müşteri sunum notları", isFromiPhone: true)
-            ]
-        }
+        let supportURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let folderURL = supportURL.appendingPathComponent("IslandMac", isDirectory: true)
+        try? FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+        storageURL = folderURL.appendingPathComponent("notes.json")
+        load()
     }
 
-    // MARK: - CRUD
-
-    func addNote(_ content: String, fromiPhone: Bool = false) {
-        let note = Note(content: content, isFromiPhone: fromiPhone)
-        notes.insert(note, at: 0)
-        saveNotes()
-    }
-
-    func deleteNote(at indexSet: IndexSet) {
-        notes.remove(atOffsets: indexSet)
-        saveNotes()
+    func addNote(_ content: String, source: String = "Mac") {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return }
+        notes.insert(Note(content: trimmed, source: source), at: 0)
+        save()
     }
 
     func deleteNote(id: UUID) {
         notes.removeAll { $0.id == id }
-        saveNotes()
+        save()
     }
 
-    // MARK: - Persistence (UserDefaults — hafif veriler için yeterli)
-
-    private func saveNotes() {
-        guard let encoded = try? JSONEncoder().encode(notes) else { return }
-        UserDefaults.standard.set(encoded, forKey: storageKey)
-    }
-
-    private func loadNotes() {
-        guard
-            let data    = UserDefaults.standard.data(forKey: storageKey),
-            let decoded = try? JSONDecoder().decode([Note].self, from: data)
-        else { return }
+    private func load() {
+        guard let data = try? Data(contentsOf: storageURL),
+              let decoded = try? decoder.decode([Note].self, from: data) else {
+            notes = []
+            return
+        }
         notes = decoded
     }
-}
 
+    private func save() {
+        guard let data = try? encoder.encode(notes) else { return }
+        try? data.write(to: storageURL, options: [.atomic])
+    }
+}

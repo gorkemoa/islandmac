@@ -1,98 +1,136 @@
 import Foundation
-import AppKit
-import Combine
+import UserNotifications
 
 enum FocusState: String {
-    case idle      = "Odaklanmaya Başla"
-    case work      = "Derin Çalışma"
+    case idle = "Hazır"
+    case work = "Derin Çalışma"
     case breakTime = "Mola"
 }
 
-class FocusService: ObservableObject {
-    @Published var currentState: FocusState = .idle
-    @Published var remainingSeconds: Int = 1500   // Varsayılan 25dk
-    @Published var totalFocusMinutesToday: Int = 0
-    @Published var sessionProgress: Double = 0.0  // 0.0 → 1.0 (yüzde dolması için)
+@MainActor
+final class FocusService: ObservableObject {
+    @Published private(set) var currentState: FocusState = .idle
+    @Published private(set) var remainingSeconds: Int = 0
+    @Published private(set) var totalFocusMinutesToday: Int = 0
+    @Published private(set) var sessionProgress: Double = 0
+    @Published private(set) var activeSessionTitle: String = "Odak yok"
 
-    private var sessionTotalSeconds: Int = 1500
+    private let defaults = UserDefaults.standard
     private var timer: Timer?
+    private var sessionTotalSeconds = 0
 
-    // MARK: - Oturum Yönetimi
+    init() {
+        totalFocusMinutesToday = defaults.integer(forKey: "focus.totalMinutesToday")
+        resetIfNeededForNewDay()
+    }
+
+    deinit {
+        timer?.invalidate()
+    }
 
     func startFocus(minutes: Int) {
-        stopTimer()
-        sessionTotalSeconds  = minutes * 60
-        remainingSeconds     = sessionTotalSeconds
-        sessionProgress      = 0.0
-        currentState         = .work
-        startTimer()
+        startSession(title: "\(minutes) dk derin çalışma", minutes: minutes, state: .work)
     }
 
     func startBreak(minutes: Int) {
-        stopTimer()
-        sessionTotalSeconds  = minutes * 60
-        remainingSeconds     = sessionTotalSeconds
-        sessionProgress      = 0.0
-        currentState         = .breakTime
-        startTimer()
+        startSession(title: "\(minutes) dk mola", minutes: minutes, state: .breakTime)
     }
 
     func stop() {
         if currentState == .work {
             let elapsed = sessionTotalSeconds - remainingSeconds
-            totalFocusMinutesToday += elapsed / 60
+            totalFocusMinutesToday += max(elapsed / 60, 0)
+            defaults.set(totalFocusMinutesToday, forKey: "focus.totalMinutesToday")
         }
-        stopTimer()
-        remainingSeconds = 0
-        sessionProgress  = 0.0
-        currentState     = .idle
-    }
 
-    // MARK: - Zamanlayıcı
-
-    private func startTimer() {
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            if self.remainingSeconds > 0 {
-                self.remainingSeconds -= 1
-                let elapsed = Double(self.sessionTotalSeconds - self.remainingSeconds)
-                self.sessionProgress = elapsed / Double(self.sessionTotalSeconds)
-            } else {
-                self.completeSession()
-            }
-        }
-    }
-
-    private func stopTimer() {
         timer?.invalidate()
         timer = nil
+        sessionTotalSeconds = 0
+        remainingSeconds = 0
+        sessionProgress = 0
+        activeSessionTitle = "Odak yok"
+        currentState = .idle
+    }
+
+    func formatTime() -> String {
+        let minutes = remainingSeconds / 60
+        let seconds = remainingSeconds % 60
+        return String(format: "%02d:%02d", minutes, seconds)
+    }
+
+    private func startSession(title: String, minutes: Int, state: FocusState) {
+        timer?.invalidate()
+        sessionTotalSeconds = max(minutes * 60, 60)
+        remainingSeconds = sessionTotalSeconds
+        sessionProgress = 0
+        activeSessionTitle = title
+        currentState = state
+
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.tick()
+            }
+        }
+        timer?.tolerance = 0.2
+    }
+
+    private func tick() {
+        guard remainingSeconds > 0 else {
+            completeSession()
+            return
+        }
+
+        remainingSeconds -= 1
+        let elapsed = sessionTotalSeconds - remainingSeconds
+        sessionProgress = min(max(Double(elapsed) / Double(max(sessionTotalSeconds, 1)), 0), 1)
     }
 
     private func completeSession() {
-        stopTimer()
+        timer?.invalidate()
+        timer = nil
+
         if currentState == .work {
             totalFocusMinutesToday += sessionTotalSeconds / 60
-            // macOS bildirimi gönder
+            defaults.set(totalFocusMinutesToday, forKey: "focus.totalMinutesToday")
+            requestNotificationPermissionIfNeeded()
             sendCompletionNotification()
         }
-        currentState    = .idle
-        sessionProgress = 1.0
+
+        currentState = .idle
+        sessionProgress = 1
+        remainingSeconds = 0
+        activeSessionTitle = "Oturum tamamlandı"
+    }
+
+    private func requestNotificationPermissionIfNeeded() {
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            guard settings.authorizationStatus == .notDetermined else { return }
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        }
     }
 
     private func sendCompletionNotification() {
-        let notification = NSUserNotification()
-        notification.title           = "Odak Oturumu Tamamlandı 🎯"
-        notification.informativeText = "Harika iş! \(sessionTotalSeconds / 60) dakika odaklandın. Mola zamanı."
-        notification.soundName       = NSUserNotificationDefaultSoundName
-        NSUserNotificationCenter.default.deliver(notification)
+        let content = UNMutableNotificationContent()
+        content.title = "Odak oturumu tamamlandı"
+        content.body = "Bir blok daha bitti. Şimdi mola verebilir veya yeni oturum başlatabilirsin."
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString,
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
     }
 
-    // MARK: - Yardımcılar
-
-    func formatTime() -> String {
-        let m = remainingSeconds / 60
-        let s = remainingSeconds % 60
-        return String(format: "%02d:%02d", m, s)
+    private func resetIfNeededForNewDay() {
+        let key = "focus.lastResetDay"
+        let today = Calendar.current.startOfDay(for: .now)
+        let lastReset = defaults.object(forKey: key) as? Date ?? .distantPast
+        if Calendar.current.isDate(lastReset, inSameDayAs: today) == false {
+            totalFocusMinutesToday = 0
+            defaults.set(today, forKey: key)
+            defaults.set(0, forKey: "focus.totalMinutesToday")
+        }
     }
 }
-

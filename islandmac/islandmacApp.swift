@@ -1,44 +1,41 @@
 import SwiftUI
 import AppKit
 
-// MARK: - Uygulama Delegesi
-
-class AppDelegate: NSObject, NSApplicationDelegate {
-    let islandState = IslandState()
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    let appModel = AppModel()
     var windowManager: IslandWindowManager?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Dock ikonunu gizle — menü çubuğu / üst alan uygulaması
         NSApp.setActivationPolicy(.accessory)
+        windowManager = IslandWindowManager(appModel: appModel)
 
-        // Island penceresini başlat
-        windowManager = IslandWindowManager(islandState: islandState)
+        if appModel.islandState.hasCompletedOnboarding == false {
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        // Ayarlar penceresi kapansa bile uygulama çalışmaya devam etsin
-        return false
+        false
     }
 }
-
-// MARK: - Ana Uygulama
 
 @main
 struct islandmacApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        // Ayarlar / ana pencere
-        WindowGroup("IslandMac Ayarları") {
-            SettingsView(islandState: appDelegate.islandState)
+        WindowGroup("IslandMac") {
+            if appDelegate.appModel.islandState.hasCompletedOnboarding {
+                SettingsView(appModel: appDelegate.appModel)
+            } else {
+                OnboardingView(appModel: appDelegate.appModel)
+            }
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 450, height: 580)
+        .defaultSize(width: 700, height: 720)
 
-        // macOS 13+ Settings sahnesi (⌘, kısayolu ile açılır)
         Settings {
-            SettingsView(islandState: appDelegate.islandState)
+            SettingsView(appModel: appDelegate.appModel)
         }
     }
 }
-

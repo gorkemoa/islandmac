@@ -1,5 +1,6 @@
 import SwiftUI
 import EventKit
+import Combine
 
 // MARK: - Ana IslandView
 
@@ -15,6 +16,7 @@ struct IslandView: View {
     @StateObject private var mediaService      = MediaService()
 
     @State private var isHovering = false
+    @State private var glowPulse: Bool = false
 
     var body: some View {
         ZStack {
@@ -30,6 +32,11 @@ struct IslandView: View {
         .animation(.spring(response: 0.28, dampingFraction: 0.9), value: isHovering)
         .onHover { hovering in
             withAnimation { isHovering = hovering }
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true)) {
+                glowPulse = true
+            }
         }
         .padding(.top, 2)
     }
@@ -48,8 +55,18 @@ struct IslandView: View {
     }
 
     private var borderOverlay: some View {
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            .stroke(borderColor, lineWidth: 1.1)
+        ZStack {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .stroke(borderColor, lineWidth: 1.1)
+            if let media = mediaService.currentMedia, media.isPlaying {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .stroke(
+                        media.platform.accentColor.opacity(glowPulse ? 0.7 : 0.2),
+                        lineWidth: glowPulse ? 2.2 : 0.6
+                    )
+                    .blur(radius: glowPulse ? 5 : 1)
+            }
+        }
     }
 
     // MARK: - İçerik
@@ -96,14 +113,21 @@ struct IslandView: View {
     private var leftStatusSection: some View {
         HStack(spacing: 8) {
             if let media = mediaService.currentMedia {
-                Circle()
-                    .fill(media.platform.accentColor.opacity(0.22))
-                    .frame(width: 26, height: 26)
-                    .overlay(
-                        Image(systemName: media.platform.icon)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(media.platform.accentColor)
-                    )
+                Group {
+                    if media.isPlaying {
+                        EqualizerBarsView(color: media.platform.accentColor)
+                            .frame(width: 26, height: 26)
+                    } else {
+                        Circle()
+                            .fill(media.platform.accentColor.opacity(0.22))
+                            .frame(width: 26, height: 26)
+                            .overlay(
+                                Image(systemName: media.platform.icon)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(media.platform.accentColor)
+                            )
+                    }
+                }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(media.title)
                         .font(.system(size: 12, weight: .semibold))
@@ -343,6 +367,7 @@ struct IslandView: View {
 
 struct MediaWidgetView: View {
     @ObservedObject var mediaService: MediaService
+    @State private var artPulse: Bool = false
 
     var body: some View {
         HStack(spacing: 16) {
@@ -356,17 +381,17 @@ struct MediaWidgetView: View {
 
     private var albumArtView: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(mediaService.currentMedia?.platform.accentColor.opacity(0.18)
                       ?? Color.white.opacity(0.08))
-                .frame(width: 58, height: 58)
+                .frame(width: 60, height: 60)
 
             if let art = mediaService.currentMedia?.albumArt {
                 Image(nsImage: art)
                     .resizable()
                     .scaledToFill()
-                    .frame(width: 58, height: 58)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .frame(width: 60, height: 60)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             } else {
                 Image(systemName: mediaService.currentMedia?.platform.icon ?? "music.note")
                     .font(.system(size: 24))
@@ -374,6 +399,24 @@ struct MediaWidgetView: View {
                         mediaService.currentMedia?.platform.accentColor ?? .white.opacity(0.25)
                     )
             }
+        }
+        .scaleEffect(artPulse ? 1.06 : 1.0)
+        .shadow(
+            color: (mediaService.currentMedia?.platform.accentColor ?? .clear)
+                .opacity(artPulse ? 0.55 : 0.1),
+            radius: artPulse ? 14 : 4
+        )
+        .onAppear { updatePulse(mediaService.currentMedia?.isPlaying) }
+        .onChange(of: mediaService.currentMedia?.isPlaying) { _, p in updatePulse(p) }
+    }
+
+    private func updatePulse(_ isPlaying: Bool?) {
+        if isPlaying == true {
+            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
+                artPulse = true
+            }
+        } else {
+            withAnimation(.easeOut(duration: 0.3)) { artPulse = false }
         }
     }
 
@@ -909,4 +952,35 @@ struct FocusChipView: View {
     IslandView(islandState: IslandState())
         .frame(width: 780, height: 260)
         .background(Color.gray.opacity(0.15))
+}
+
+// MARK: - Equalizer Animasyonu
+
+struct EqualizerBarsView: View {
+    let color: Color
+    @State private var heights: [CGFloat] = [0.4, 0.75, 0.5]
+    private let ticker = Timer.publish(every: 0.28, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 3) {
+            ForEach(0..<3, id: \.self) { i in
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [color, color.opacity(0.55)],
+                            startPoint: .top, endPoint: .bottom
+                        )
+                    )
+                    .frame(width: 3, height: heights[i] * 14 + 4)
+                    .animation(
+                        .spring(response: 0.28, dampingFraction: 0.55)
+                            .delay(Double(i) * 0.06),
+                        value: heights[i]
+                    )
+            }
+        }
+        .onReceive(ticker) { _ in
+            heights = (0..<3).map { _ in CGFloat.random(in: 0.2...1.0) }
+        }
+    }
 }

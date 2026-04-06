@@ -1,64 +1,153 @@
-import SwiftUI
+import Foundation
+import Combine
 
-// MARK: - Ada Mod Tanımları
-
-enum IslandMode: Equatable {
-    case passive     // Notch boyutunda minimal
-    case mini        // Küçük özet bilgi
-    case active      // Normal aktif durum
-    case expanded    // Genişletilmiş panel (tıklanınca)
-    case fullPanel   // Tam panel
+enum IslandPresentationMode: String, CaseIterable, Codable {
+    case compact
+    case expanded
 }
 
-// MARK: - Sekme Tanımları
+enum IslandModule: String, CaseIterable, Identifiable, Codable {
+    case overview
+    case media
+    case meetings
+    case focus
+    case tasks
+    case notes
+    case device
 
-enum IslandTab: String, CaseIterable, Identifiable {
-    case media    = "Medya"
-    case meetings = "Toplantı"
-    case focus    = "Odak"
-    case tasks    = "Görevler"
-    case notes    = "Notlar"
-    case device   = "iPhone"
+    var id: String { rawValue }
 
-    var id: String { self.rawValue }
+    var title: String {
+        switch self {
+        case .overview: return "Akış"
+        case .media: return "Medya"
+        case .meetings: return "Toplantı"
+        case .focus: return "Odak"
+        case .tasks: return "Görev"
+        case .notes: return "Not"
+        case .device: return "iPhone"
+        }
+    }
 
     var icon: String {
         switch self {
-        case .media:    return "music.note"
-        case .meetings: return "video.fill"
-        case .focus:    return "timer"
-        case .tasks:    return "checkmark.circle"
-        case .notes:    return "note.text"
-        case .device:   return "iphone"
+        case .overview: return "sparkles.rectangle.stack"
+        case .media: return "music.note.tv"
+        case .meetings: return "video.badge.waveform"
+        case .focus: return "timer"
+        case .tasks: return "checklist"
+        case .notes: return "note.text"
+        case .device: return "iphone.gen3"
         }
     }
 }
 
-// MARK: - IslandState
+@MainActor
+final class IslandState: ObservableObject {
+    @Published var presentationMode: IslandPresentationMode
+    @Published var visibleModules: [IslandModule]
+    @Published var compactAccentModule: IslandModule
+    @Published var hasCompletedOnboarding: Bool
 
-@Observable
-class IslandState {
-    var mode: IslandMode = .active
-    var isExpanded: Bool = false
-    var activeTab: IslandTab = .media
+    private let defaults: UserDefaults
+    private var cancellables = Set<AnyCancellable>()
 
-    // Hangi sekmelerin göründüğü (kullanıcı ayarlarla değiştirebilir)
-    var visibleTabs: [IslandTab] = IslandTab.allCases
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
 
-    // İlk açılış onboarding kontrolü
-    var hasCompletedOnboarding: Bool = false
+        if let raw = defaults.string(forKey: "island.presentationMode"),
+           let mode = IslandPresentationMode(rawValue: raw) {
+            presentationMode = mode
+        } else {
+            presentationMode = .compact
+        }
 
-    // Eski uyumluluk — bazı view'lar hâlâ WidgetType kullanıyorsa
-    var currentWidgetType: WidgetType = .calendar
-}
+        if let modules = defaults.array(forKey: "island.visibleModules") as? [String] {
+            let resolved = modules.compactMap(IslandModule.init(rawValue:))
+            visibleModules = resolved.isEmpty ? IslandModule.allCases : resolved
+        } else {
+            visibleModules = IslandModule.allCases
+        }
 
-// MARK: - Eski WidgetType (uyumluluk için tutuldu)
+        if let raw = defaults.string(forKey: "island.compactAccentModule"),
+           let module = IslandModule(rawValue: raw) {
+            compactAccentModule = module
+        } else {
+            compactAccentModule = .overview
+        }
 
-enum WidgetType: String, CaseIterable {
-    case calendar     = "Bugün"
-    case meetings     = "Toplantı"
-    case focus        = "Odak"
-    case tasks        = "Görevler"
-    case notes        = "Notlar"
-    case deviceStatus = "iPhone"
+        hasCompletedOnboarding = defaults.bool(forKey: "island.hasCompletedOnboarding")
+        bindPersistence()
+    }
+
+    var isExpanded: Bool {
+        presentationMode == .expanded
+    }
+
+    var panelSize: CGSize {
+        switch presentationMode {
+        case .compact:
+            return CGSize(width: 430, height: 84)
+        case .expanded:
+            return CGSize(width: 1080, height: 540)
+        }
+    }
+
+    func toggleExpanded() {
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
+            presentationMode = isExpanded ? .compact : .expanded
+        }
+    }
+
+    func setExpanded(_ expanded: Bool) {
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.86)) {
+            presentationMode = expanded ? .expanded : .compact
+        }
+    }
+
+    func setModuleVisibility(_ module: IslandModule, isVisible: Bool) {
+        if isVisible {
+            if visibleModules.contains(module) == false {
+                visibleModules.append(module)
+            }
+        } else {
+            visibleModules.removeAll { $0 == module }
+            if visibleModules.isEmpty {
+                visibleModules = [.overview]
+            }
+            if compactAccentModule == module {
+                compactAccentModule = visibleModules.first ?? .overview
+            }
+        }
+    }
+
+    func completeOnboarding() {
+        hasCompletedOnboarding = true
+    }
+
+    private func bindPersistence() {
+        $presentationMode
+            .sink { [weak self] mode in
+                self?.defaults.set(mode.rawValue, forKey: "island.presentationMode")
+            }
+            .store(in: &cancellables)
+
+        $visibleModules
+            .sink { [weak self] modules in
+                self?.defaults.set(modules.map(\.rawValue), forKey: "island.visibleModules")
+            }
+            .store(in: &cancellables)
+
+        $compactAccentModule
+            .sink { [weak self] module in
+                self?.defaults.set(module.rawValue, forKey: "island.compactAccentModule")
+            }
+            .store(in: &cancellables)
+
+        $hasCompletedOnboarding
+            .sink { [weak self] value in
+                self?.defaults.set(value, forKey: "island.hasCompletedOnboarding")
+            }
+            .store(in: &cancellables)
+    }
 }
